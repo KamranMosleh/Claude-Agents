@@ -25,17 +25,46 @@ const MODEL            = "claude-sonnet-4-20250514";
 const MCPS = [{ id: "indeed", label: "Indeed", url: "https://mcp.indeed.com/claude/mcp" }];
 
 // Compact board list — long strings were causing web-search prompt overflow
-const IT_BOARDS = "LinkedIn Italia, InfoJobs.it, Monster.it, Lavoro.it, Adzuna.it, Jobrapido, Glassdoor Italia";
+const IT_BOARDS = "LinkedIn Italia, InfoJobs.it, Monster.it, Lavoro.it, Adzuna.it, Jobrapido, Glassdoor Italia, Subito.it/lavoro, TrovoLavoro.it";
 
+function getCutoffDate(id) {
+  const days = { week:7, "2weeks":14, month:30 }[id];
+  if (!days) return null;
+  return new Date(Date.now() - days * 86400000);
+}
 function postedInstruction(id) {
-  return {
-    week:   "IMPORTANT: Only jobs posted in the last 7 days.",
-    "2weeks": "IMPORTANT: Only jobs posted in the last 14 days.",
-    month:  "IMPORTANT: Only jobs posted in the last 30 days.",
-  }[id] || "";
+  const cutoff = getCutoffDate(id);
+  if (!cutoff) return "";
+  const today  = new Date().toISOString().slice(0,10);
+  const cutStr = cutoff.toISOString().slice(0,10);
+  return `⚠ DATE FILTER (mandatory): Today is ${today}. Include ONLY jobs posted on or after ${cutStr}. Exclude every listing older than ${cutStr}. Set postedDate as YYYY-MM-DD.`;
 }
 function postedLabel(id) {
   return { any:"Any date", week:"This week", "2weeks":"Last 2 weeks", month:"Last 30 days" }[id] || "Any date";
+}
+
+// Client-side date guard — removes jobs that are clearly outside the requested window
+function withinRange(job, posted) {
+  const cutoff = getCutoffDate(posted);
+  if (!cutoff || !job.postedDate || job.postedDate === "null") return true;
+  const s = job.postedDate.trim();
+  let d = null;
+  // ISO / partial ISO
+  if (/^\d{4}-\d{2}-\d{2}/.test(s))                             d = new Date(s);
+  // "X days ago" / "X giorni fa"
+  else if (/(\d+)\s*(day|giorno|giorni)/i.test(s))              { const [,n] = s.match(/(\d+)\s*(day|giorno|giorni)/i); d = new Date(Date.now() - n*86400000); }
+  // "X weeks ago" / "X settimane fa"
+  else if (/(\d+)\s*(week|settimana|settimane)/i.test(s))       { const [,n] = s.match(/(\d+)\s*(week|settimana|settimane)/i); d = new Date(Date.now() - n*7*86400000); }
+  // "X months ago" / "X mesi fa"
+  else if (/(\d+)\s*(month|mese|mesi)/i.test(s))                { const [,n] = s.match(/(\d+)\s*(month|mese|mesi)/i); d = new Date(Date.now() - n*30*86400000); }
+  // "yesterday" / "ieri"
+  else if (/yesterday|ieri/i.test(s))                            d = new Date(Date.now() - 86400000);
+  // "today" / "oggi"
+  else if (/today|oggi/i.test(s))                                d = new Date();
+  // Fallback: try native parse (handles "15 maggio 2025", "May 15 2025", etc.)
+  else { const p = Date.parse(s); if (!isNaN(p)) d = new Date(p); }
+  if (!d || isNaN(d)) return true; // unparseable → keep
+  return d >= cutoff;
 }
 
 // ── JSON extractor ────────────────────────────────────────────────────────────
@@ -71,35 +100,29 @@ function dedupe(jobs) {
   });
 }
 
-// Separate prompt builders to keep each path lean
+// Separate prompt builders — date instruction is placed FIRST so the model sees it before the task
 function buildMcpPrompt(query, city, type, level, cvText, posted) {
-  const loc = city === "Remote (IT)" ? "remote Italy" : `${city}, Italy`;
-  const f   = [type !== "Any" && type, level !== "Any level" && level].filter(Boolean).join(" ");
-  const cv  = cvText.trim().slice(0, CV_CHAR_LIMIT);
-  const cvSec = cv
-    ? `\n\nCandidate CV:\n${cv}\n\nAdd a "cvNote" field to each job: 2 actionable CV tips for Italian market.`
-    : "";
-  const date = postedInstruction(posted);
-  return `Search for ${f ? f+" " : ""}"${query}" jobs in ${loc}.${cvSec}
+  const loc  = city === "Remote (IT)" ? "remote Italy" : `${city}, Italy`;
+  const f    = [type !== "Any" && type, level !== "Any level" && level].filter(Boolean).join(" ");
+  const cv   = cvText.trim().slice(0, CV_CHAR_LIMIT);
+  const cvSec = cv ? `\n\nCandidate CV:\n${cv}\n\nAdd "cvNote" to each job: 2 actionable CV tips for Italian market.` : "";
+  const date  = postedInstruction(posted);
+  return `${date ? date+"\n\n" : ""}Search for ${f ? f+" " : ""}"${query}" jobs in ${loc}.${cvSec}
 
 Find 5–8 real current listings. Include closely related roles if exact matches are scarce. Also try Italian synonyms (e.g. "controllo qualità", "tecnico qualità", "responsabile qualità").
-${date}
-Return ONLY a valid JSON array [ ... ]. No text before or after. Each object: title, company, location, type, salary (string|null), description (2–3 sentences), requirements (string[]), url (string|null), isRemote (boolean), postedDate (string|null), source${cv ? ", cvNote" : ""}.`;
+Return ONLY a valid JSON array [ ... ]. No text before or after. Each object: title, company, location, type, salary (string|null), description (2–3 sentences), requirements (string[]), url (string|null), isRemote (boolean), postedDate (YYYY-MM-DD or null), source${cv ? ", cvNote" : ""}.`;
 }
 
 function buildWebPrompt(query, city, type, level, cvText, posted) {
-  const loc = city === "Remote (IT)" ? "remote Italy" : `${city}, Italy`;
-  const f   = [type !== "Any" && type, level !== "Any level" && level].filter(Boolean).join(" ");
-  const cv  = cvText.trim().slice(0, CV_CHAR_LIMIT);
-  const cvSec = cv
-    ? `\n\nCandidate CV:\n${cv}\n\nAdd a "cvNote" field to each job: 2 actionable CV tips for Italian market.`
-    : "";
-  const date = postedInstruction(posted);
-  return `Search ${IT_BOARDS} for ${f ? f+" " : ""}"${query}" jobs in ${loc}. Also search in Italian (e.g. "controllo qualità", "tecnico qualità", "addetto produzione").${cvSec}
+  const loc  = city === "Remote (IT)" ? "remote Italy" : `${city}, Italy`;
+  const f    = [type !== "Any" && type, level !== "Any level" && level].filter(Boolean).join(" ");
+  const cv   = cvText.trim().slice(0, CV_CHAR_LIMIT);
+  const cvSec = cv ? `\n\nCandidate CV:\n${cv}\n\nAdd "cvNote" to each job: 2 actionable CV tips for Italian market.` : "";
+  const date  = postedInstruction(posted);
+  return `${date ? date+"\n\n" : ""}Search ${IT_BOARDS} for ${f ? f+" " : ""}"${query}" jobs in ${loc}. Also search in Italian (e.g. "controllo qualità", "tecnico qualità", "addetto produzione").${cvSec}
 
 Find 5–8 real current listings. Include related roles if exact matches are scarce.
-${date}
-Return ONLY a valid JSON array [ ... ]. No text before or after. Each object: title, company, location, type, salary (string|null), description (2–3 sentences), requirements (string[]), url (string|null), isRemote (boolean), postedDate (string|null), source${cv ? ", cvNote" : ""}.`;
+Return ONLY a valid JSON array [ ... ]. No text before or after. Each object: title, company, location, type, salary (string|null), description (2–3 sentences), requirements (string[]), url (string|null), isRemote (boolean), postedDate (YYYY-MM-DD or null), source${cv ? ", cvNote" : ""}.`;
 }
 
 async function callClaude({ prompt, mcpServer, useWebSearch }) {
@@ -364,7 +387,8 @@ export default function ItaliaJobAgent() {
       setS("gemini","loading");
       try {
         const j = await fetchGemini(key, query, city, type, level, cvText, posted);
-        setJobs(j); setS("gemini","done"); setC("gemini", j.length);
+        const jf = j.filter(x => withinRange(x, posted));
+        setJobs(jf); setS("gemini","done"); setC("gemini", jf.length);
       } catch (e) { setError(e.message); setS("gemini","error"); setE("gemini", e.message); }
 
     } else {
@@ -404,13 +428,17 @@ export default function ItaliaJobAgent() {
         }
       }
 
-      const merged = dedupe([...indeedJobs, ...webJobs]);
-      setJobs(merged);
-      if (!merged.length) {
+      const merged   = dedupe([...indeedJobs, ...webJobs]);
+      const filtered = merged.filter(j => withinRange(j, posted));
+      setJobs(filtered);
+      if (!filtered.length) {
+        const dateHint = posted !== "any" && merged.length > 0
+          ? ` ${merged.length} result(s) found but all were outside the selected date range — try "Any date".`
+          : "";
         const hint = srcMode === "waterfall"
           ? "If Indeed shows ✕, re-connect it at claude.ai/settings/integrations, or switch to Web only."
           : "Try a different keyword or city.";
-        setError("No results found. " + hint);
+        setError("No results found. " + hint + dateHint);
       }
     }
     setLoading(false);
