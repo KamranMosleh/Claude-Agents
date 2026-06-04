@@ -21,7 +21,7 @@ Common artifact types include:
 - Single-page HTML websites
 - SVG images
 - Diagrams and flowcharts
-- Interactive React components
+- **Interactive React components**
 
 Artifacts appear in a dedicated window beside the conversation. You can ask Claude to edit them, switch between versions, view code, copy content, and download files.
 
