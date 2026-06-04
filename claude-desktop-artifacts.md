@@ -46,6 +46,8 @@ Source: [What are artifacts and how do I use them?](https://support.claude.com/e
 
 Artifacts can connect to external tools through MCP on Pro, Max, Team, and Enterprise plans on Claude web and desktop.
 
+Note: free accounts do not get MCP access inside artifacts, so an enabled connector can still show zero results there.
+
 MCP-connected artifacts can read from and write to connected tools such as calendars, task managers, internal systems, or custom MCP servers. When an artifact first needs an MCP tool, the user is prompted to approve access. Each user must authenticate MCP servers independently, even for shared or published artifacts.
 
 Practical implications:
